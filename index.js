@@ -3,6 +3,7 @@ const cors = require('cors');
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 const jwt = require('jsonwebtoken');
 require('dotenv').config();
+const stripe = require('stripe')(process.env.STRIPE_KEY);
 
 const app = express();
 
@@ -43,6 +44,7 @@ async function run() {
         const bookingsCollection = client.db('doctorsPortal').collection('bookings');
         const usersCollection = client.db('doctorsPortal').collection('users');
         const doctorsCollection = client.db('doctorsPortal').collection('doctors');
+        const paymentsCollection = client.db('doctorsPortal').collection('payments');
 
         // NOTE: make sure you use verifyadmin after verifyJWT
         const verifyAdmin = async(req, res, next) => {
@@ -143,13 +145,13 @@ async function run() {
 
 
         // get bookings data
-        app.get('/bookings',  async(req, res) => {
+        app.get('/bookings', verifyJWT,  async(req, res) => {
             const email = req.query.email;
-            // const decodedEmail = req.decoded.email;
+            const decodedEmail = req.decoded.email;
 
-            // if(email === decodedEmail){
-            //     return res.status(403).send({message: 'Forbidden access'})
-            // }
+            if(email !== decodedEmail){
+                return res.status(403).send({message: 'Forbidden access'});
+            }
 
             const query = { email: email};
             const bookings = await bookingsCollection.find(query).toArray();
@@ -190,11 +192,47 @@ async function run() {
             const user = await usersCollection.findOne(query);
             
             if(user){
-                const token = jwt.sign({email}, process.env.ACCESS_TOKEN, {expiresIn: '1h'});
+                const token = jwt.sign({email}, process.env.ACCESS_TOKEN, {expiresIn: '1d'});
                 return res.send({accessToken: token});
             }
             res.status(403).send({accessToken: ''})
-        })
+        });
+
+        // payment method with stripe 
+        app.post('/create-payment-intent', async(req, res) => {
+            const booking = req.body;
+            const price = booking.price;
+            const amount = price * 100;
+
+            const paymentIntent = await stripe.paymentIntents.create({
+                currency: 'usd',
+                amount: amount,
+                "payment_method_types": [
+                    "card"
+                  ],
+            })
+            res.send({
+                clientSecret: paymentIntent.client_secret,
+              });
+        });
+
+        // create payment
+        app.post('/payments', async(req, res) => {
+            const payment = req.body;
+            const result = await paymentsCollection.insertOne(payment);
+            
+            const id = payment.bookingId;
+            const filter = {_id: ObjectId(id)};
+            const updateDoc = {
+                $set: {
+                    paid: true,
+                    transactionId: payment.transactionId
+                }
+            }
+            const updatedResult = await bookingsCollection.updateOne(filter, updateDoc);
+
+            res.send(result);
+        });
 
         // get users
         app.get('/users', async(req, res) => {
